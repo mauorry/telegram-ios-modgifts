@@ -6,7 +6,8 @@ import SwiftSignalKit
 /// runs without a Postbox transaction, so it cannot read `PreferencesKeys.starGifts()` directly;
 /// this cache is refreshed wherever the catalog is written (`_internal_keepCachedStarGiftsUpdated`)
 /// and once at account start, giving the incoming-message hook a synchronous, deterministic lookup.
-private final class GiftTransferCatalogCache {
+// Internal (not private): StarGifts.swift updates this cache where the catalog is written.
+final class GiftTransferCatalogCache {
     static let shared = GiftTransferCatalogCache()
     private let queue = Queue()
     private var giftsByAccount: [PeerId: [Int64: StarGift.Gift]] = [:]
