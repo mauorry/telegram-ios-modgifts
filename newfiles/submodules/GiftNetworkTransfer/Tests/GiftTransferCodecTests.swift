@@ -4,7 +4,7 @@ import GiftNetworkTransfer
 
 final class GiftTransferCodecTests: XCTestCase {
     func testRoundTripPreservesAllFields() {
-        let payload = GiftTransferCodec.Payload(giftId: 5170145172328432345, number: 1234, text: "Happy birthday!", nameHidden: false, transferId: 987654321)
+        let payload = GiftTransferCodec.Payload(slug: "PlushPepe-1", text: "Happy birthday!", nameHidden: false, transferId: 987654321)
         guard let encoded = GiftTransferCodec.encode(payload) else {
             XCTFail("encode returned nil")
             return
@@ -15,10 +15,11 @@ final class GiftTransferCodecTests: XCTestCase {
             return
         }
         XCTAssertEqual(decoded, payload)
+        XCTAssertEqual(decoded.slug, "PlushPepe-1")
     }
 
     func testRoundTripWithoutText() {
-        let payload = GiftTransferCodec.Payload(giftId: 42, number: 7, text: nil, nameHidden: true, transferId: 1)
+        let payload = GiftTransferCodec.Payload(slug: "Durov-8", text: nil, nameHidden: true, transferId: 1)
         guard let encoded = GiftTransferCodec.encode(payload), let decoded = GiftTransferCodec.decode(encoded) else {
             XCTFail("round trip failed")
             return
@@ -29,7 +30,7 @@ final class GiftTransferCodecTests: XCTestCase {
     }
 
     func testVisibleTextStripsPayloadAndTrailingSpace() {
-        let payload = GiftTransferCodec.Payload(giftId: 1, number: 1, text: nil, nameHidden: false, transferId: 1)
+        let payload = GiftTransferCodec.Payload(slug: "PlushPepe-1", text: nil, nameHidden: false, transferId: 1)
         guard let encoded = GiftTransferCodec.encode(payload) else {
             XCTFail("encode returned nil")
             return
@@ -37,6 +38,24 @@ final class GiftTransferCodecTests: XCTestCase {
         XCTAssertEqual(GiftTransferCodec.visibleText("Hello " + encoded), "Hello")
         XCTAssertEqual(GiftTransferCodec.visibleText(encoded), "")
         XCTAssertEqual(GiftTransferCodec.visibleText("No gift here"), "No gift here")
+    }
+
+    func testDisplayTextFallsBackToCollectibleLink() {
+        // A stock client should still see a tappable NFT link when the message carries nothing else.
+        let payload = GiftTransferCodec.Payload(slug: "PlushPepe-1", text: nil, nameHidden: false, transferId: 1)
+        guard let encoded = GiftTransferCodec.encode(payload) else {
+            XCTFail("encode returned nil")
+            return
+        }
+        XCTAssertEqual(GiftTransferCodec.displayText(payload: payload, originalText: encoded), "t.me/nft/PlushPepe-1")
+        // The sender's own caption wins over the generated link.
+        XCTAssertEqual(GiftTransferCodec.displayText(payload: payload, originalText: "Enjoy! " + encoded), "Enjoy!")
+    }
+
+    func testSlugNumberExtraction() {
+        XCTAssertEqual(GiftTransferCodec.Payload(slug: "PlushPepe-1234", text: nil, nameHidden: false, transferId: 1).slugNumber, 1234)
+        XCTAssertNil(GiftTransferCodec.Payload(slug: "NoNumberHere", text: nil, nameHidden: false, transferId: 1).slugNumber)
+        XCTAssertNil(GiftTransferCodec.Payload(slug: "Bad-NotANumber", text: nil, nameHidden: false, transferId: 1).slugNumber)
     }
 
     func testStockMessageHasNoTransfer() {
@@ -55,21 +74,34 @@ final class GiftTransferCodecTests: XCTestCase {
     }
 
     func testUnknownVersionIsRejected() {
-        // Hand-build a payload with a future version.
-        let json = "{\"v\":99,\"g\":1,\"n\":1,\"h\":false,\"i\":1}"
+        let json = "{\"v\":99,\"s\":\"PlushPepe-1\",\"h\":false,\"i\":1}"
         let encoded = GiftTransferCodec.markerStart + Data(json.utf8).base64EncodedString() + GiftTransferCodec.markerEnd
         XCTAssertNil(GiftTransferCodec.decode(encoded))
     }
 
-    func testInvalidIdsAreRejected() {
-        let zeroGift = "{\"v\":1,\"g\":0,\"n\":1,\"h\":false,\"i\":1}"
-        XCTAssertNil(GiftTransferCodec.decode(GiftTransferCodec.markerStart + Data(zeroGift.utf8).base64EncodedString() + GiftTransferCodec.markerEnd))
-        let zeroTransfer = "{\"v\":1,\"g\":1,\"n\":1,\"h\":false,\"i\":0}"
-        XCTAssertNil(GiftTransferCodec.decode(GiftTransferCodec.markerStart + Data(zeroTransfer.utf8).base64EncodedString() + GiftTransferCodec.markerEnd))
+    func testLegacyV1PayloadIsRejected() {
+        // The v1 wire shape (giftId/number, no slug) must not decode under v2.
+        let json = "{\"v\":1,\"g\":42,\"n\":7,\"h\":false,\"i\":1}"
+        let encoded = GiftTransferCodec.markerStart + Data(json.utf8).base64EncodedString() + GiftTransferCodec.markerEnd
+        XCTAssertNil(GiftTransferCodec.decode(encoded))
+    }
+
+    func testInvalidSlugAndTransferIdAreRejected() {
+        func wrapped(_ json: String) -> String {
+            return GiftTransferCodec.markerStart + Data(json.utf8).base64EncodedString() + GiftTransferCodec.markerEnd
+        }
+        // Empty slug.
+        XCTAssertNil(GiftTransferCodec.decode(wrapped("{\"v\":2,\"s\":\"\",\"h\":false,\"i\":1}")))
+        // No hyphen / no number part.
+        XCTAssertNil(GiftTransferCodec.decode(wrapped("{\"v\":2,\"s\":\"PlushPepe\",\"h\":false,\"i\":1}")))
+        XCTAssertNil(GiftTransferCodec.decode(wrapped("{\"v\":2,\"s\":\"Plush-ABC\",\"h\":false,\"i\":1}")))
+        // Zero transfer id.
+        XCTAssertNil(GiftTransferCodec.decode(wrapped("{\"v\":2,\"s\":\"PlushPepe-1\",\"h\":false,\"i\":0}")))
+        // A well-formed slug must decode.
+        XCTAssertNotNil(GiftTransferCodec.decode(wrapped("{\"v\":2,\"s\":\"PlushPepe-1\",\"h\":false,\"i\":1}")))
     }
 
     func testMarkersAreInvisibleZeroWidth() {
-        // The markers must be zero-width so a stock client renders nothing for them.
         XCTAssertEqual(GiftTransferCodec.markerStart, "\u{200B}")
         XCTAssertEqual(GiftTransferCodec.markerEnd, "\u{200C}")
     }
@@ -78,7 +110,7 @@ final class GiftTransferCodecTests: XCTestCase {
         // A worst-case payload (long accompanying text) must stay well under Telegram's
         // 4096-character message limit even after base64 expansion.
         let longText = String(repeating: "a", count: 500)
-        let payload = GiftTransferCodec.Payload(giftId: Int64.max, number: Int32.max, text: longText, nameHidden: true, transferId: Int64.max)
+        let payload = GiftTransferCodec.Payload(slug: "PlushPepe-\(Int32.max)", text: longText, nameHidden: true, transferId: Int64.max)
         guard let encoded = GiftTransferCodec.encode(payload) else {
             XCTFail("encode returned nil")
             return
@@ -87,7 +119,7 @@ final class GiftTransferCodecTests: XCTestCase {
     }
 
     func testUnicodeTextSurvivesRoundTrip() {
-        let payload = GiftTransferCodec.Payload(giftId: 7, number: 3, text: "С днём рождения! 🎁✨", nameHidden: false, transferId: 555)
+        let payload = GiftTransferCodec.Payload(slug: "PlushPepe-1", text: "С днём рождения! 🎁✨", nameHidden: false, transferId: 555)
         guard let encoded = GiftTransferCodec.encode(payload), let decoded = GiftTransferCodec.decode("prefix " + encoded) else {
             XCTFail("round trip failed")
             return

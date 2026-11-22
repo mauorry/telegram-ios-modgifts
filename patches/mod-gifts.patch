@@ -17,7 +17,7 @@
  internal import TelegramApi
  
  
-@@ -1266,9 +1267,32 @@
+@@ -1266,9 +1267,37 @@
                      threadId = Int64(quickReplyShortcutId)
                  }
                  
@@ -27,32 +27,37 @@
 -                
 +
 +                // Mod gift transfer: a text message carrying the hidden GiftNetworkTransfer marker
-+                // is rendered as a collectible gift bubble. The marker is stripped from the visible
-+                // text and a synthetic .starGiftUnique action is added, so the stock gift bubble and
-+                // GiftViewScreen draw it with no further changes. The model animation is resolved from
-+                // the cached catalog by giftId; if the catalog lacks it, the message stays plain text.
++                // names a REAL collectible gift by its slug (the t.me/nft/<slug> identifier).
++                // When the slug is already resolved in the per-slug cache, the marker is stripped,
++                // the visible text falls back to the collectible link (so stock clients see a
++                // tappable gift link), and the server's own .starGiftUnique record is added as
++                // media — the stock gift bubble and GiftViewScreen draw it unchanged.
 +                //
-+                // The API text entities were computed over the original (marker-prefixed) string, so
-+                // their offsets no longer match the stripped text. The gift bubble renders the gift
-+                // text from the action (skipText = true) and never draws the message text, so the
-+                // message-level entity list is cleared rather than shifted; this keeps the stored
-+                // entities in range and leaves tags/search over an empty entity set.
++                // When the slug is NOT yet resolved (first sighting, offline), the message stays
++                // plain text with the collectible link; ingest resolves the slug and rewrites the
++                // message into the gift form, so the bubble appears on the next update.
++                //
++                // The API text entities were computed over the original (marker-prefixed) string,
++                // so their offsets no longer match the rewritten text. The gift bubble renders the
++                // gift text from the action (skipText = true) and never draws the message text,
++                // so the message-level entity list is cleared rather than shifted; this keeps the
++                // stored entities in range and leaves tags/search over an empty entity set.
 +                var isGiftTransferMessage = false
 +                if GiftTransferCodec.containsTransfer(messageText), let payload = GiftTransferCodec.decode(messageText) {
-+                    if let catalogGift = GiftTransferResolver.cachedGift(accountPeerId: accountPeerId, giftId: payload.giftId) {
-+                        let recipientPeerId = peerId
-+                        let uniqueGift = GiftTransferResolver.makeUniqueGift(gift: catalogGift, number: payload.number, transferId: payload.transferId, senderPeerId: authorId, recipientPeerId: recipientPeerId, date: date, text: payload.text)
++                    if let uniqueGift = GiftTransferResolver.resolvedGift(accountPeerId: accountPeerId, slug: payload.slug) {
 +                        let action = GiftTransferResolver.makeAction(uniqueGift: uniqueGift, senderId: authorId, text: payload.text, nameHidden: payload.nameHidden)
 +                        medias.append(action)
-+                        messageText = GiftTransferCodec.visibleText(messageText)
++                        messageText = GiftTransferCodec.displayText(payload: payload, originalText: messageText)
 +                        isGiftTransferMessage = true
++                    } else {
++                        messageText = GiftTransferCodec.displayText(payload: payload, originalText: messageText)
 +                    }
 +                }
 +
                  var consumableContent: (Bool, Bool)? = nil
                  
                  if let media = media {
-@@ -1386,7 +1410,13 @@
+@@ -1386,7 +1415,13 @@
                  }
              
                  var entitiesAttribute: TextEntitiesMessageAttribute?
@@ -152,42 +157,45 @@
                      }
                  }
              }
-@@ -2200,10 +2240,19 @@
+@@ -2200,10 +2240,22 @@
      }
      
      func updateStarGiftAddedToProfile(reference: StarGiftReference, added: Bool) {
--        self.actionDisposable.set(
--            _internal_updateStarGiftAddedToProfile(account: self.account, reference: reference, added: added).startStrict()
--        )
--        
-+        // Mod gift transfers are local: persist the display choice and skip the server call
-+        // (a synthetic slug has no server-side saved gift to toggle).
-+        if case let .slug(slug) = reference, ModProfileGiftsStore.isModGiftSlug(slug) {
-+            let peerId = self.peerId
++        let peerId = self.peerId
++        // A mod grant is a real collectible, so the server DOES have a saved-gift record — but the
++        // grant itself only exists in the mod store. Persist the display choice locally; the
++        // server call still runs so a genuinely owned gift stays in sync (it fails harmlessly for
++        // a gift the server does not consider saved).
++        if case let .slug(slug) = reference {
 +            self.cacheDisposable.set(self.account.postbox.transaction { transaction in
-+                ModProfileGiftsStore.setSaved(transaction: transaction, peerId: peerId, slug: slug, saved: added)
++                if ModProfileGiftsStore.isModGiftReference(reference, transaction: transaction, peerId: peerId) {
++                    ModProfileGiftsStore.setSaved(transaction: transaction, peerId: peerId, slug: slug, saved: added)
++                }
 +            }.start())
-+        } else {
-+            self.actionDisposable.set(
-+                _internal_updateStarGiftAddedToProfile(account: self.account, reference: reference, added: added).startStrict()
-+            )
 +        }
+         self.actionDisposable.set(
+             _internal_updateStarGiftAddedToProfile(account: self.account, reference: reference, added: added).startStrict()
+         )
+-        
 +
          if let index = self.gifts.firstIndex(where: { $0.reference == reference }) {
              if !added && self.gifts[index].pinnedToTop {
                  let pinnedGifts = self.gifts.filter { $0.pinnedToTop && $0.reference != reference }
-@@ -2308,7 +2357,17 @@
+@@ -2308,7 +2360,20 @@
          }
  
          self.pushState()
 -        
 +
-+        // Mod gift transfers are local: persist the pin choice and skip the server call + reload
-+        // (a reload would re-scan history and could drop the just-applied local pin ordering).
-+        if case let .slug(slug) = reference, ModProfileGiftsStore.isModGiftSlug(slug) {
++        // A mod grant's pin choice is local: persist it (inside the transaction that can check the
++        // mod store) and skip the server call + reload, which would re-fetch the server's own
++        // ordering and drop the just-applied local pin.
++        if case let .slug(slug) = reference {
 +            let peerId = self.peerId
 +            self.cacheDisposable.set(self.account.postbox.transaction { transaction in
-+                ModProfileGiftsStore.setPinned(transaction: transaction, peerId: peerId, slug: slug, pinned: pinnedToTop)
++                if ModProfileGiftsStore.isModGiftReference(reference, transaction: transaction, peerId: peerId) {
++                    ModProfileGiftsStore.setPinned(transaction: transaction, peerId: peerId, slug: slug, pinned: pinnedToTop)
++                }
 +            }.start())
 +            return
 +        }
@@ -195,14 +203,27 @@
          var signal = _internal_updateStarGiftsPinnedToTop(account: self.account, peerId: self.peerId, references: effectiveReferences)
          if saveToProfile {
              signal = _internal_updateStarGiftAddedToProfile(account: self.account, reference: reference, added: true)
+@@ -3754,7 +3819,7 @@
+     case alreadyBurned
+ }
+ 
+-private func cachedUniqueStarGiftEntryId(slug: String) -> ItemCacheEntryId {
++func cachedUniqueStarGiftEntryId(slug: String) -> ItemCacheEntryId {
+     return ItemCacheEntryId(collectionId: Namespaces.CachedItemCollection.cachedUniqueStarGifts, key: ValueBoxKey(slug))
+ }
+ 
 --- a/submodules/TelegramCore/Sources/State/AccountTaskManager.swift
 +++ b/submodules/TelegramCore/Sources/State/AccountTaskManager.swift
-@@ -133,6 +133,8 @@
+@@ -133,6 +133,12 @@
                      tasks.add(_internal_loadedStickerPack(postbox: self.stateManager.postbox, network: self.stateManager.network, reference: .iconTopicEmoji, forceActualized: true).start())
                      tasks.add(managedPeerColorUpdates(postbox: self.stateManager.postbox, network: self.stateManager.network).start())
                      tasks.add(managedStarGiftsUpdates(postbox: self.stateManager.postbox, network: self.stateManager.network, accountPeerId: self.stateManager.accountPeerId).start())
-+                    // Seed the mod gift-transfer catalog cache from the persisted list at start.
++                    // Seed the mod gift-transfer caches (catalog + resolved collectible slugs) from
++                    // the persisted stores at start, and drain any transfers whose slug resolution
++                    // was still pending when the app last stopped.
 +                    refreshGiftTransferCatalogCache(postbox: self.stateManager.postbox, accountPeerId: self.stateManager.accountPeerId)
++                    refreshGiftTransferSlugCache(postbox: self.stateManager.postbox, accountPeerId: self.stateManager.accountPeerId)
++                    tasks.add(ModProfileGiftsStore.drainPendingTask(postbox: self.stateManager.postbox, network: self.stateManager.network, accountPeerId: self.stateManager.accountPeerId).start())
                      tasks.add(managedSavedMusicIdsUpdates(postbox: self.stateManager.postbox, network: self.stateManager.network, accountPeerId: self.stateManager.accountPeerId).start())
                      tasks.add(managedEmojiGameUpdates(postbox: self.stateManager.postbox, network: self.stateManager.network).start())
                      tasks.add(managedSynchronizeCloudAITextStyles(postbox: self.stateManager.postbox, network: self.stateManager.network).start())
@@ -290,13 +311,31 @@
                          return true
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
 +++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
-@@ -1635,15 +1635,19 @@
+@@ -1612,7 +1612,16 @@
+             }
+ 
+             let forcedLinkedCommunityId = Atomic<EnginePeer.Id?>(value: nil)
+-            
++
++            // Explicitly typed so the optional branch does not defeat type inference in the
++            // 23-way combineLatest below: a profile without a gifts context contributes nil.
++            let profileGiftsStateSignal: Signal<ProfileGiftsContext.State?, NoError>
++            if let profileGiftsContext {
++                profileGiftsStateSignal = profileGiftsContext.state |> map(Optional.init)
++            } else {
++                profileGiftsStateSignal = .single(nil)
++            }
++
+             return combineLatest(
+                 context.account.viewTracker.peerView(peerId, updateData: true),
+                 peerInfoAvailableMediaPanes(context: context, peerId: peerId, chatLocation: chatLocation, isMyProfile: isMyProfile, chatLocationContextHolder: chatLocationContextHolder, sharedMediaFromForumTopic: sharedMediaFromForumTopic),
+@@ -1635,15 +1644,19 @@
                  premiumGiftOptions,
                  webAppPermissions,
                  savedMusicContext.state,
 -                combineLatest(businessConnectedBot, walletBalance, agentState)
 +                combineLatest(businessConnectedBot, walletBalance, agentState),
-+                profileGiftsContext?.state ?? .single(nil)
++                profileGiftsStateSignal
              )
 -            |> mapToSignal { peerView, availablePanes, globalNotificationSettings, encryptionKeyFingerprint, status, hasStories, hasStoryArchive, recommendedBots, accountIsPremium, savedMessagesPeer, hasSavedMessagesChats, hasSavedMessages, hasSavedMessageTags, hasBotPreviewItems, personalChannel, privacySettings, starsRevenueContextAndState, revenueContextAndState, premiumGiftOptions, webAppPermissions, savedMusicState, businessConnectedBotAndWalletBalanceAndAgentState -> Signal<PeerInfoScreenData, NoError> in
 +            |> mapToSignal { peerView, availablePanes, globalNotificationSettings, encryptionKeyFingerprint, status, hasStories, hasStoryArchive, recommendedBots, accountIsPremium, savedMessagesPeer, hasSavedMessagesChats, hasSavedMessages, hasSavedMessageTags, hasBotPreviewItems, personalChannel, privacySettings, starsRevenueContextAndState, revenueContextAndState, premiumGiftOptions, webAppPermissions, savedMusicState, businessConnectedBotAndWalletBalanceAndAgentState, profileGiftsState -> Signal<PeerInfoScreenData, NoError> in
@@ -313,7 +352,7 @@
                              availablePanes?.insert(.gifts, at: 1)
                          }
                      }
-@@ -1654,9 +1658,12 @@
+@@ -1654,9 +1667,12 @@
                      if hasStories, peerView.peers[peerView.peerId] is TelegramUser, peerView.peerId != context.account.peerId {
                          availablePanes?.insert(.stories, at: 0)
                      }
@@ -330,14 +369,15 @@
                      }
 --- a/Telegram/Telegram-iOS/en.lproj/Localizable.strings
 +++ b/Telegram/Telegram-iOS/en.lproj/Localizable.strings
-@@ -17342,3 +17342,10 @@
+@@ -17342,3 +17342,11 @@
  "VoiceOver.Reactions.ShowAll" = "Show All Reactions";
  "VoiceOver.Reactions.Premium" = "Premium Reactions";
  "VoiceOver.Passcode.Incorrect" = "Incorrect passcode. Please try again.";
 +"Gift.Transfer.PickTitle" = "Send a gift";
 +"Gift.Transfer.SelectedTitle" = "Gift selected";
-+"Gift.Transfer.EnterNumber" = "Enter the collectible number for this gift.";
++"Gift.Transfer.Loading" = "Loading your gifts…";
++"Gift.Transfer.NoGifts" = "You have no collectible gifts to send yet. Receive or buy one first.";
 +"Gift.Transfer.EnterMessage" = "Add a message to the gift (optional).";
 +"Gift.Transfer.MessagePlaceholder" = "Your message";
-+"Gift.Transfer.Hint" = "This gift is sent to users of the modified client. It appears in their profile and in this chat.";
++"Gift.Transfer.Hint" = "The gift is sent to users of the modified client and appears in their profile. Other clients see a link to the collectible.";
 +"Gift.Transfer.Send" = "Send";
