@@ -63,13 +63,18 @@ def main():
     if r.returncode != 0:
         print("import failed: " + r.stderr.decode(errors="replace"), file=sys.stderr)
         return 1
-    # Find the signing identity name from the imported certificate.
-    ident = run(["security", "find-identity", "-v", "-p", "codesigning", keychain], check=True).stdout.decode()
-    m = re.search(r'"([^"]+)"', ident)
-    if not m:
-        print("no signing identity found in keychain", file=sys.stderr)
+    # Find the signing identity: extract the certificate CN from the p12 with openssl (the same
+    # approach the repo's own GenerateProfiles.py uses). `security find-identity -p codesigning`
+    # does not list this self-signed cert (no codesigning trust), so do not rely on it.
+    cert_pem = run(["openssl", "pkcs12", "-in", str(p12), "-passin", "pass:", "-nokeys", "-legacy"]).stdout
+    subj = subprocess.run(["openssl", "x509", "-noout", "-subject", "-nameopt", "oneline,-esc_msb"],
+                          input=cert_pem, capture_output=True).stdout.decode()
+    identity = None
+    if "CN = " in subj:
+        identity = subj.split("CN = ")[-1].split(",")[0].strip()
+    if not identity:
+        print(f"could not extract CN from p12, subject={subj!r}", file=sys.stderr)
         return 1
-    identity = m.group(1)
     print(f"signing identity: {identity}")
 
     for name in PROFILES:
