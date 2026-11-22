@@ -26,7 +26,8 @@ public enum ModProfileGiftsStore {
         }
     }
 
-    private static let collectionId: Int8 = applicationSpecificItemCacheCollectionId(7)
+    // 16 is the first free app-specific collection id (PostboxKeys.swift uses 0-7, 10-15).
+    private static let collectionId: Int8 = applicationSpecificItemCacheCollectionId(16)
 
     private static func entryId(peerId: EnginePeer.Id) -> ItemCacheEntryId {
         let key = ValueBoxKey(length: 8)
