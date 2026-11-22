@@ -3,6 +3,7 @@ import UIKit
 import AsyncDisplayKit
 import Display
 import ComponentFlow
+import ViewControllerComponent
 import SwiftSignalKit
 import AccountContext
 import TelegramCore
