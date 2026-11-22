@@ -48,7 +48,7 @@ public final class GiftTransferSetupScreen: ViewControllerComponentContainer {
             }
             // The receiver resolves the slug itself; the sender already has the resolved gift, so
             // its own local echo can render at once. Warm the slug cache either way.
-            warmGiftTransferSlug(postbox: context.account.postbox, network: context.account.network, accountPeerId: context.account.peerId, slug: uniqueGift.slug)
+            context.engine.payments.warmGiftTransferSlug(slug: uniqueGift.slug)
             let action = GiftTransferResolver.makeAction(uniqueGift: uniqueGift, senderId: context.account.peerId, text: payload.text, nameHidden: false)
             // A gift message with no caption carries the official collectible link, so a stock
             // client still sees a tappable gift link instead of an empty message.

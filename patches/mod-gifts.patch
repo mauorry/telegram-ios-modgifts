@@ -212,6 +212,23 @@
      return ItemCacheEntryId(collectionId: Namespaces.CachedItemCollection.cachedUniqueStarGifts, key: ValueBoxKey(slug))
  }
  
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Payments/TelegramEnginePayments.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/TelegramEnginePayments.swift
+@@ -157,6 +157,14 @@
+             return _internal_fulfillStarsSubscription(account: self.account, peerId: peerId, subscriptionId: subscriptionId)
+         }
+         
++        public func resolveGiftTransferSlug(slug: String) -> Signal<StarGift.UniqueGift?, NoError> {
++            return resolveGiftTransferSlug(postbox: self.account.postbox, network: self.account.network, accountPeerId: self.account.peerId, slug: slug)
++        }
++
++        public func warmGiftTransferSlug(slug: String) {
++            warmGiftTransferSlug(postbox: self.account.postbox, network: self.account.network, accountPeerId: self.account.peerId, slug: slug)
++        }
++
+         public func cachedStarGifts() -> Signal<[StarGift]?, NoError> {
+             return _internal_cachedStarGifts(postbox: self.account.postbox)
+             |> map { starGiftsList in
 --- a/submodules/TelegramCore/Sources/State/AccountTaskManager.swift
 +++ b/submodules/TelegramCore/Sources/State/AccountTaskManager.swift
 @@ -133,6 +133,12 @@
