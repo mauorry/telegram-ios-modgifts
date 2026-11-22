@@ -226,7 +226,7 @@ private final class GiftTransferSetupScreenComponent: Component {
             let sideInset: CGFloat = 16.0
             let spacing: CGFloat = 12.0
             let itemWidth = floorToScreenPixels((availableSize.width - sideInset * 2.0 - spacing * CGFloat(columnCount - 1)) / CGFloat(columnCount))
-            let itemHeight = itemWidth * 1.35
+            let itemHeight = itemWidth
 
             var validIds = Set<Int64>()
             var y: CGFloat = 0.0
