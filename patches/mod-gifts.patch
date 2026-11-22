@@ -79,7 +79,7 @@
                      let starGiftsLists = StarGiftsList(items: gifts.compactMap { StarGift(apiStarGift: $0) }, hashValue: hash)
                      transaction.setPreferencesEntry(key: PreferencesKeys.starGifts(), value: PreferencesEntry(starGiftsLists))
 +                    // Keep the mod gift-transfer catalog cache in sync with the persisted list.
-+                    GiftTransferCatalogCache.shared.update(accountPeerId: accountPeerId, items: starGiftsLists.items)
++                    GiftTransferCatalogCache.shared.update(accountPeerId: accountPeerId, catalogItems: starGiftsLists.items)
                  case .starGiftsNotModified:
                      break
                  }
@@ -219,11 +219,11 @@
          }
          
 +        public func resolveGiftTransferSlug(slug: String) -> Signal<StarGift.UniqueGift?, NoError> {
-+            return resolveGiftTransferSlug(postbox: self.account.postbox, network: self.account.network, accountPeerId: self.account.peerId, slug: slug)
++            return TelegramCore.resolveGiftTransferSlug(postbox: self.account.postbox, network: self.account.network, accountPeerId: self.account.peerId, slug: slug)
 +        }
 +
 +        public func warmGiftTransferSlug(slug: String) {
-+            warmGiftTransferSlug(postbox: self.account.postbox, network: self.account.network, accountPeerId: self.account.peerId, slug: slug)
++            TelegramCore.warmGiftTransferSlug(postbox: self.account.postbox, network: self.account.network, accountPeerId: self.account.peerId, slug: slug)
 +        }
 +
          public func cachedStarGifts() -> Signal<[StarGift]?, NoError> {

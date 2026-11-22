@@ -92,7 +92,7 @@ public enum ModProfileGiftsStore {
             }
             // Already a gift action (rendered at StoreMessage time, or a prior ingest rewrite).
             if let action = message.media.compactMap({ $0 as? TelegramMediaAction }).first,
-               case let .starGiftUnique(gift, _, _, _, _, _, _, _, _, senderId, _, _, _, _, _, _, _, _, _, text, entities, nameHidden) = action.action,
+               case let .starGiftUnique(gift, _, _, _, _, _, _, _, _, senderId, _, _, _, _, _, _, _, _, _, text, _, nameHidden) = action.action,
                case let .unique(uniqueGift) = gift {
                 // Only treat as a mod grant if the message text still carries a marker OR the
                 // store already knows this slug as a mod grant (rewritten messages lose the
