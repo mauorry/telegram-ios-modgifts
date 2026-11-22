@@ -1,0 +1,343 @@
+--- a/submodules/TelegramCore/BUILD
++++ b/submodules/TelegramCore/BUILD
+@@ -13,6 +13,7 @@
+     ],
+     deps = [
+         "//submodules/TelegramApi:TelegramApi",
++        "//submodules/GiftNetworkTransfer:GiftNetworkTransfer",
+         "//submodules/MtProtoKit:MtProtoKit",
+         "//submodules/MediaPreuploadRegistry:MediaPreuploadRegistry",
+         "//submodules/WebProxyTransport:WebProxyTransport",
+--- a/submodules/TelegramCore/Sources/ApiUtils/StoreMessage_Telegram.swift
++++ b/submodules/TelegramCore/Sources/ApiUtils/StoreMessage_Telegram.swift
+@@ -1,5 +1,6 @@
+ import Foundation
+ import Postbox
++import GiftNetworkTransfer
+ internal import TelegramApi
+ 
+ 
+@@ -1266,9 +1267,32 @@
+                     threadId = Int64(quickReplyShortcutId)
+                 }
+                 
+-                let messageText = message
++                var messageText = message
+                 var medias: [Media] = []
+-                
++
++                // Mod gift transfer: a text message carrying the hidden GiftNetworkTransfer marker
++                // is rendered as a collectible gift bubble. The marker is stripped from the visible
++                // text and a synthetic .starGiftUnique action is added, so the stock gift bubble and
++                // GiftViewScreen draw it with no further changes. The model animation is resolved from
++                // the cached catalog by giftId; if the catalog lacks it, the message stays plain text.
++                //
++                // The API text entities were computed over the original (marker-prefixed) string, so
++                // their offsets no longer match the stripped text. The gift bubble renders the gift
++                // text from the action (skipText = true) and never draws the message text, so the
++                // message-level entity list is cleared rather than shifted; this keeps the stored
++                // entities in range and leaves tags/search over an empty entity set.
++                var isGiftTransferMessage = false
++                if GiftTransferCodec.containsTransfer(messageText), let payload = GiftTransferCodec.decode(messageText) {
++                    if let catalogGift = GiftTransferResolver.cachedGift(accountPeerId: accountPeerId, giftId: payload.giftId) {
++                        let recipientPeerId = peerId
++                        let uniqueGift = GiftTransferResolver.makeUniqueGift(gift: catalogGift, number: payload.number, transferId: payload.transferId, senderPeerId: authorId, recipientPeerId: recipientPeerId, date: date, text: payload.text)
++                        let action = GiftTransferResolver.makeAction(uniqueGift: uniqueGift, senderId: authorId, text: payload.text, nameHidden: payload.nameHidden)
++                        medias.append(action)
++                        messageText = GiftTransferCodec.visibleText(messageText)
++                        isGiftTransferMessage = true
++                    }
++                }
++
+                 var consumableContent: (Bool, Bool)? = nil
+                 
+                 if let media = media {
+@@ -1386,7 +1410,13 @@
+                 }
+             
+                 var entitiesAttribute: TextEntitiesMessageAttribute?
+-                if let entities, !entities.isEmpty {
++                if isGiftTransferMessage {
++                    // Gift bubble draws the gift text from the action, not the message text; the
++                    // original API entities were offset into the marker-prefixed string, so clear them.
++                    let attribute = TextEntitiesMessageAttribute(entities: [])
++                    entitiesAttribute = attribute
++                    attributes.append(attribute)
++                } else if let entities, !entities.isEmpty {
+                     let attribute = TextEntitiesMessageAttribute(entities: messageTextEntitiesFromApiEntities(entities))
+                     entitiesAttribute = attribute
+                     attributes.append(attribute)
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Payments/StarGifts.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/StarGifts.swift
+@@ -1379,6 +1379,8 @@
+ 
+                     let starGiftsLists = StarGiftsList(items: gifts.compactMap { StarGift(apiStarGift: $0) }, hashValue: hash)
+                     transaction.setPreferencesEntry(key: PreferencesKeys.starGifts(), value: PreferencesEntry(starGiftsLists))
++                    // Keep the mod gift-transfer catalog cache in sync with the persisted list.
++                    GiftTransferCatalogCache.shared.update(accountPeerId: accountPeerId, items: starGiftsLists.items)
+                 case .starGiftsNotModified:
+                     break
+                 }
+@@ -2099,6 +2101,13 @@
+         }
+         |> mapToSignal { inputPeer -> Signal<([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?), NoError> in
+             guard let inputPeer else {
++                // No input peer (offline / not yet resolved): still surface mod gifts from history.
++                if collectionId == nil && (initialNextOffset == nil || reload) {
++                    return postbox.transaction { transaction -> ([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?) in
++                        let modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                        return (modGifts, Int32(modGifts.count), nil, nil)
++                    }
++                }
+                 return .single(([], 0, nil, nil))
+             }
+             var flags: Int32 = 0
+@@ -2137,6 +2146,13 @@
+             }
+             |> mapToSignal { result -> Signal<([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?), NoError> in
+                 guard let result else {
++                    // Server unreachable: still surface mod gifts from history on the first page.
++                    if collectionId == nil && (initialNextOffset == nil || reload) {
++                        return postbox.transaction { transaction -> ([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?) in
++                            let modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                            return (modGifts, Int32(modGifts.count), nil, nil)
++                        }
++                    }
+                     return .single(([], 0, nil, nil))
+                 }
+                 return postbox.transaction { transaction -> ([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?) in
+@@ -2145,7 +2161,7 @@
+                         let (_, count, apiNotificationsEnabled, apiGifts, nextOffset, chats, users) = (savedStarGiftsData.flags, savedStarGiftsData.count, savedStarGiftsData.chatNotificationsEnabled, savedStarGiftsData.gifts, savedStarGiftsData.nextOffset, savedStarGiftsData.chats, savedStarGiftsData.users)
+                         let parsedPeers = AccumulatedPeers(transaction: transaction, chats: chats, users: users)
+                         updatePeers(transaction: transaction, accountPeerId: accountPeerId, peers: parsedPeers)
+-                        
++
+                         var notificationsEnabled: Bool?
+                         if let apiNotificationsEnabled {
+                             if case .boolTrue = apiNotificationsEnabled {
+@@ -2154,9 +2170,33 @@
+                                 notificationsEnabled = false
+                             }
+                         }
+-                        
+-                        let gifts = apiGifts.compactMap { ProfileGiftsContext.State.StarGift(apiSavedStarGift: $0, peerId: peerId, transaction: transaction) }
+-                        return (gifts, count, nextOffset, notificationsEnabled)
++
++                        var gifts = apiGifts.compactMap { ProfileGiftsContext.State.StarGift(apiSavedStarGift: $0, peerId: peerId, transaction: transaction) }
++                        var totalCount = count
++                        // Mod gift transfers live in the chat history, not on the server. Merge them
++                        // into the first page of the main (non-collection) list so the profile shows
++                        // every granted mod gift alongside real ones. Dedup by synthetic slug so a
++                        // reload never doubles them, and count them toward the displayed total.
++                        if collectionId == nil && (initialNextOffset == nil || reload) {
++                            let modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                            if !modGifts.isEmpty {
++                                let existingSlugs = Set(gifts.compactMap { gift -> String? in
++                                    if case let .unique(uniqueGift) = gift.gift {
++                                        return uniqueGift.slug
++                                    }
++                                    return nil
++                                })
++                                let newModGifts = modGifts.filter { gift in
++                                    if case let .unique(uniqueGift) = gift.gift {
++                                        return !existingSlugs.contains(uniqueGift.slug)
++                                    }
++                                    return true
++                                }
++                                gifts.append(contentsOf: newModGifts)
++                                totalCount += Int32(newModGifts.count)
++                            }
++                        }
++                        return (gifts, totalCount, nextOffset, notificationsEnabled)
+                     }
+                 }
+             }
+@@ -2200,10 +2240,19 @@
+     }
+     
+     func updateStarGiftAddedToProfile(reference: StarGiftReference, added: Bool) {
+-        self.actionDisposable.set(
+-            _internal_updateStarGiftAddedToProfile(account: self.account, reference: reference, added: added).startStrict()
+-        )
+-        
++        // Mod gift transfers are local: persist the display choice and skip the server call
++        // (a synthetic slug has no server-side saved gift to toggle).
++        if case let .slug(slug) = reference, ModProfileGiftsStore.isModGiftSlug(slug) {
++            let peerId = self.peerId
++            self.cacheDisposable.set(self.account.postbox.transaction { transaction in
++                ModProfileGiftsStore.setSaved(transaction: transaction, peerId: peerId, slug: slug, saved: added)
++            }.start())
++        } else {
++            self.actionDisposable.set(
++                _internal_updateStarGiftAddedToProfile(account: self.account, reference: reference, added: added).startStrict()
++            )
++        }
++
+         if let index = self.gifts.firstIndex(where: { $0.reference == reference }) {
+             if !added && self.gifts[index].pinnedToTop {
+                 let pinnedGifts = self.gifts.filter { $0.pinnedToTop && $0.reference != reference }
+@@ -2308,7 +2357,17 @@
+         }
+ 
+         self.pushState()
+-        
++
++        // Mod gift transfers are local: persist the pin choice and skip the server call + reload
++        // (a reload would re-scan history and could drop the just-applied local pin ordering).
++        if case let .slug(slug) = reference, ModProfileGiftsStore.isModGiftSlug(slug) {
++            let peerId = self.peerId
++            self.cacheDisposable.set(self.account.postbox.transaction { transaction in
++                ModProfileGiftsStore.setPinned(transaction: transaction, peerId: peerId, slug: slug, pinned: pinnedToTop)
++            }.start())
++            return
++        }
++
+         var signal = _internal_updateStarGiftsPinnedToTop(account: self.account, peerId: self.peerId, references: effectiveReferences)
+         if saveToProfile {
+             signal = _internal_updateStarGiftAddedToProfile(account: self.account, reference: reference, added: true)
+--- a/submodules/TelegramCore/Sources/State/AccountTaskManager.swift
++++ b/submodules/TelegramCore/Sources/State/AccountTaskManager.swift
+@@ -133,6 +133,8 @@
+                     tasks.add(_internal_loadedStickerPack(postbox: self.stateManager.postbox, network: self.stateManager.network, reference: .iconTopicEmoji, forceActualized: true).start())
+                     tasks.add(managedPeerColorUpdates(postbox: self.stateManager.postbox, network: self.stateManager.network).start())
+                     tasks.add(managedStarGiftsUpdates(postbox: self.stateManager.postbox, network: self.stateManager.network, accountPeerId: self.stateManager.accountPeerId).start())
++                    // Seed the mod gift-transfer catalog cache from the persisted list at start.
++                    refreshGiftTransferCatalogCache(postbox: self.stateManager.postbox, accountPeerId: self.stateManager.accountPeerId)
+                     tasks.add(managedSavedMusicIdsUpdates(postbox: self.stateManager.postbox, network: self.stateManager.network, accountPeerId: self.stateManager.accountPeerId).start())
+                     tasks.add(managedEmojiGameUpdates(postbox: self.stateManager.postbox, network: self.stateManager.network).start())
+                     tasks.add(managedSynchronizeCloudAITextStyles(postbox: self.stateManager.postbox, network: self.stateManager.network).start())
+--- a/submodules/TelegramCore/Sources/State/Sync/StateReplay+Messages.swift
++++ b/submodules/TelegramCore/Sources/State/Sync/StateReplay+Messages.swift
+@@ -78,6 +78,10 @@
+         }
+ 
+         let _ = transaction.addMessages(messages, location: location)
++        // Mod gift transfers: upsert any synthetic gift into its owner's profile store. This is
++        // the single choke point that sees every delivered message (both directions) with an
++        // active transaction; it only writes the mod-gift cache, never the messages themselves.
++        ModProfileGiftsStore.ingest(transaction: transaction, accountPeerId: accountPeerId, messages: messages)
+         if case .UpperHistoryBlock = location {
+             for message in messages {
+                 let chatPeerId = message.id.peerId
+--- a/submodules/TelegramUI/BUILD
++++ b/submodules/TelegramUI/BUILD
+@@ -73,6 +73,7 @@
+         "//submodules/Display:Display",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramCore:TelegramCore",
++        "//submodules/GiftNetworkTransfer:GiftNetworkTransfer",
+         "//submodules/WebProxyTransport:WebProxyTransport",
+         "//submodules/MtProtoKit:MtProtoKit",
+         "//submodules/TelegramPresentationData:TelegramPresentationData",
+@@ -511,6 +512,7 @@
+         "//submodules/TelegramUI/Components/Gifts/GiftOptionsScreen",
+         "//submodules/TelegramUI/Components/Gifts/GiftStoreScreen",
+         "//submodules/TelegramUI/Components/Gifts/GiftSetupScreen",
++        "//submodules/TelegramUI/Components/Gifts/GiftTransferSetupScreen",
+         "//submodules/TelegramUI/Components/Gifts/GiftCraftScreen",
+         "//submodules/TelegramUI/Components/ContentReportScreen",
+         "//submodules/TelegramUI/Components/PeerInfo/AffiliateProgramSetupScreen",
+--- a/submodules/TelegramUI/Sources/ChatControllerOpenAttachmentMenu.swift
++++ b/submodules/TelegramUI/Sources/ChatControllerOpenAttachmentMenu.swift
+@@ -27,6 +27,7 @@
+ import ChatEntityKeyboardInputNode
+ import PremiumUI
+ import PremiumGiftAttachmentScreen
++import GiftTransferSetupScreen
+ import TelegramCallsUI
+ import AutomaticBusinessMessageSetupScreen
+ import MediaEditorScreen
+@@ -421,6 +422,12 @@
+                     if !premiumGiftOptions.isEmpty {
+                         buttons.insert(.gift, at: 1)
+                     }
++                    // Mod gift transfer: offer the gift button in a plain user chat even when the
++                    // server's premium gift options are empty, so a mod gift can be sent to another
++                    // mod-client user. The .gift handler opens the transfer screen for this case.
++                    if premiumGiftOptions.isEmpty, let user = strongSelf.presentationInterfaceState.renderedPeer?.peer as? TelegramUser, user.botInfo == nil, !user.isDeleted, user.id != strongSelf.context.account.peerId, !buttons.contains(.gift) {
++                        buttons.insert(.gift, at: 1)
++                    }
+                     let firstBotIndex = buttons.firstIndex(where: { button in
+                         if case .app = button {
+                             return true
+@@ -1006,8 +1013,26 @@
+                                 })
+                                 completion(controller, controller.mediaPickerContext)
+                                 strongSelf.controllerNavigationDisposable.set(nil)
+-                                
++
+                                 let _ = ApplicationSpecificNotice.incrementDismissedPremiumGiftSuggestion(accountManager: context.sharedContext.accountManager, peerId: peer.id, timestamp: Int32(Date().timeIntervalSince1970)).startStandalone()
++                            } else if peer.id.namespace == Namespaces.Peer.CloudUser, peer.id != context.account.peerId {
++                                // Mod gift transfer: encode the gift into a normal text message.
++                                // The hidden marker carries the payload to the other mod client; the
++                                // local echo carries the synthetic action so the bubble shows at once.
++                                // This is a modal picker, not an attachment panel: dismiss the menu
++                                // and push it directly.
++                                let transferController = GiftTransferSetupScreen(context: context, peerId: peer.id, completion: { [weak strongSelf] result in
++                                    guard let strongSelf else {
++                                        return
++                                    }
++                                    var messages = [EnqueueMessage.message(text: result.text, attributes: [], inlineStickers: [:], mediaReference: AnyMediaReference.standalone(media: result.media), threadId: strongSelf.chatLocation.threadId, replyToMessageId: strongSelf.presentationInterfaceState.interfaceState.replyMessageSubject?.subjectModel, replyToStoryId: nil, localGroupingKey: nil, correlationId: nil, bubbleUpEmojiOrStickersets: [])]
++                                    messages = strongSelf.transformEnqueueMessages(messages)
++                                    strongSelf.sendMessages(messages)
++                                })
++                                strongSelf.attachmentController?.dismiss(animated: true)
++                                strongSelf.push(transferController)
++                                strongSelf.controllerNavigationDisposable.set(nil)
++                                return true
+                             }
+                         }
+                         return true
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
+@@ -1635,15 +1635,19 @@
+                 premiumGiftOptions,
+                 webAppPermissions,
+                 savedMusicContext.state,
+-                combineLatest(businessConnectedBot, walletBalance, agentState)
++                combineLatest(businessConnectedBot, walletBalance, agentState),
++                profileGiftsContext?.state ?? .single(nil)
+             )
+-            |> mapToSignal { peerView, availablePanes, globalNotificationSettings, encryptionKeyFingerprint, status, hasStories, hasStoryArchive, recommendedBots, accountIsPremium, savedMessagesPeer, hasSavedMessagesChats, hasSavedMessages, hasSavedMessageTags, hasBotPreviewItems, personalChannel, privacySettings, starsRevenueContextAndState, revenueContextAndState, premiumGiftOptions, webAppPermissions, savedMusicState, businessConnectedBotAndWalletBalanceAndAgentState -> Signal<PeerInfoScreenData, NoError> in
++            |> mapToSignal { peerView, availablePanes, globalNotificationSettings, encryptionKeyFingerprint, status, hasStories, hasStoryArchive, recommendedBots, accountIsPremium, savedMessagesPeer, hasSavedMessagesChats, hasSavedMessages, hasSavedMessageTags, hasBotPreviewItems, personalChannel, privacySettings, starsRevenueContextAndState, revenueContextAndState, premiumGiftOptions, webAppPermissions, savedMusicState, businessConnectedBotAndWalletBalanceAndAgentState, profileGiftsState -> Signal<PeerInfoScreenData, NoError> in
+                 let (businessConnectedBot, walletBalance, agentState) = businessConnectedBotAndWalletBalanceAndAgentState
+                 var availablePanes = availablePanes
+                 if isMyProfile {
+                     availablePanes?.insert(.stories, at: 0)
+                     if availablePanes != nil, profileGiftsContext != nil, let cachedData = peerView.cachedData as? CachedUserData {
+-                        if let starGiftsCount = cachedData.starGiftsCount, starGiftsCount > 0 {
++                        // Mod gift transfers are not counted by the server's starGiftsCount; show the
++                        // gifts pane when the profile gifts context has loaded any gifts (real or mod).
++                        let hasLoadedGifts = !(profileGiftsState?.gifts.isEmpty ?? true)
++                        if (cachedData.starGiftsCount ?? 0) > 0 || hasLoadedGifts {
+                             availablePanes?.insert(.gifts, at: 1)
+                         }
+                     }
+@@ -1654,9 +1658,12 @@
+                     if hasStories, peerView.peers[peerView.peerId] is TelegramUser, peerView.peerId != context.account.peerId {
+                         availablePanes?.insert(.stories, at: 0)
+                     }
+-                    
++
+                     if availablePanes != nil, profileGiftsContext != nil, let cachedData = peerView.cachedData as? CachedUserData, peerView.peerId != context.account.peerId {
+-                        if let starGiftsCount = cachedData.starGiftsCount, starGiftsCount > 0 {
++                        // Mod gift transfers are not counted by the server's starGiftsCount; show the
++                        // gifts pane when the profile gifts context has loaded any gifts (real or mod).
++                        let hasLoadedGifts = !(profileGiftsState?.gifts.isEmpty ?? true)
++                        if (cachedData.starGiftsCount ?? 0) > 0 || hasLoadedGifts {
+                             availablePanes?.insert(.gifts, at: hasStories ? 1 : 0)
+                         }
+                     }
+--- a/Telegram/Telegram-iOS/en.lproj/Localizable.strings
++++ b/Telegram/Telegram-iOS/en.lproj/Localizable.strings
+@@ -17342,3 +17342,10 @@
+ "VoiceOver.Reactions.ShowAll" = "Show All Reactions";
+ "VoiceOver.Reactions.Premium" = "Premium Reactions";
+ "VoiceOver.Passcode.Incorrect" = "Incorrect passcode. Please try again.";
++"Gift.Transfer.PickTitle" = "Send a gift";
++"Gift.Transfer.SelectedTitle" = "Gift selected";
++"Gift.Transfer.EnterNumber" = "Enter the collectible number for this gift.";
++"Gift.Transfer.EnterMessage" = "Add a message to the gift (optional).";
++"Gift.Transfer.MessagePlaceholder" = "Your message";
++"Gift.Transfer.Hint" = "This gift is sent to users of the modified client. It appears in their profile and in this chat.";
++"Gift.Transfer.Send" = "Send";

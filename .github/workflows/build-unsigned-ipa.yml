@@ -1,0 +1,203 @@
+name: Build mod-gifts unsigned IPA
+
+# Builds an unsigned iOS .ipa of Telegram-iOS with the mod-gifts feature, on a GitHub-hosted
+# macOS runner. The output is intentionally unsigned: sign it at install time with a free Apple
+# ID via Sideloadly on Windows (see README.md).
+#
+# Manual dispatch only on purpose: a single run costs ~90 runner minutes.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # versions.json in the pinned upstream declares xcode 27.1 / macos 27 / iphoneos27.1 SDK.
+    # The `xcode-27` runner image is macOS 27 with Xcode 27.1 as the DEFAULT and ships the
+    # iphoneos27.1 SDK, so Bazel's resolved toolchain and `xcrun` inside the actions agree.
+    # Do not move this to macos-latest (Xcode 26.x): the minor mismatch makes ibtool report
+    # "iOS 27 Platform Not Installed". If the standard runner runs out of RAM/disk, switch the
+    # label to `xcode-27-xlarge` (paid) — see README "Troubleshooting".
+    runs-on: xcode-27
+    timeout-minutes: 720
+
+    env:
+      # Pinned upstream commit. release-13.2 == master HEAD as of 2026-11-22. The patch in
+      # patches/ is written against exactly this revision; bump both together or apply_mods.sh
+      # refuses (it runs `git apply --check` first).
+      UPSTREAM_REF: 24638bc69bd083981b178dd1e7f921eebbf7fc46
+      # Locales kept in the shipped IPA (smaller, and free-Apple-ID signing has an App-ID budget).
+      IPA_KEEP_LOCALES: Base,en,ru
+      # The build is unsigned; Sideloadly re-signs and assigns its own bundle id. We still strip
+      # extensions so the free account needs only ONE App ID (each extension would eat another).
+      IPA_DROP_PLUGINS: Watch,Widget,BroadcastUpload,Share,Notification,Intents
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Restore Bazel disk cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/bazel-disk-cache
+          key: bazel-disk-cache-${{ runner.os }}-${{ env.UPSTREAM_REF }}-v1
+          restore-keys: |
+            bazel-disk-cache-${{ runner.os }}-${{ env.UPSTREAM_REF }}-
+
+      - name: Clone upstream Telegram-iOS
+        run: |
+          set -euxo pipefail
+          git clone -j8 --filter=blob:none https://github.com/TelegramMessenger/Telegram-iOS.git "$RUNNER_TEMP/telegram-ios"
+          git -C "$RUNNER_TEMP/telegram-ios" checkout "$UPSTREAM_REF"
+          git -C "$RUNNER_TEMP/telegram-ios" submodule sync --recursive
+          git -C "$RUNNER_TEMP/telegram-ios" submodule update --init --recursive --jobs 8
+
+      - name: Apply mod-gifts patch
+        run: |
+          set -euxo pipefail
+          bash "$GITHUB_WORKSPACE/scripts/apply_mods.sh" "$RUNNER_TEMP/telegram-ios" "$GITHUB_WORKSPACE"
+
+      - name: Set active Xcode version
+        run: |
+          set -euxo pipefail
+          SOURCE_DIR="$RUNNER_TEMP/telegram-ios"
+          XCODE_VERSION=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["xcode"])' "$SOURCE_DIR/versions.json")
+          XCODE_MAJOR="${XCODE_VERSION%%.*}"
+          DEFAULT_XCODE="/Applications/Xcode.app/Contents/Developer"
+          DEFAULT_VERSION=""
+          if [[ -d "$DEFAULT_XCODE" ]]; then
+            DEFAULT_VERSION="$("$DEFAULT_XCODE/usr/bin/xcodebuild" -version 2>/dev/null | awk '/^Xcode/{print $2}')"
+          fi
+          echo "versions.json wants Xcode $XCODE_VERSION (major $XCODE_MAJOR); image default is ${DEFAULT_VERSION:-none}"
+          ls -d /Applications/Xcode*.app || true
+
+          SELECTED_DEVELOPER=""
+          # Prefer the image default when its major version matches what upstream declares.
+          if [[ -n "$DEFAULT_VERSION" && "${DEFAULT_VERSION%%.*}" == "$XCODE_MAJOR" ]]; then
+            SELECTED_DEVELOPER="$DEFAULT_XCODE"
+          fi
+          if [[ -z "$SELECTED_DEVELOPER" && -d "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer/Platforms/iPhoneOS.platform" ]]; then
+            SELECTED_DEVELOPER="/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          fi
+          if [[ -z "$SELECTED_DEVELOPER" ]]; then
+            for candidate in /Applications/Xcode_${XCODE_MAJOR}.*.app/Contents/Developer; do
+              if [[ -d "$candidate/Platforms/iPhoneOS.platform" ]]; then
+                SELECTED_DEVELOPER="$candidate"
+              fi
+            done
+          fi
+          if [[ -z "$SELECTED_DEVELOPER" ]]; then
+            echo "No installed Xcode has a usable iOS platform" >&2
+            exit 1
+          fi
+          echo "Using Xcode developer dir: $SELECTED_DEVELOPER"
+          sudo xcode-select -s "$SELECTED_DEVELOPER"
+          xcodebuild -version
+          echo "--- iphoneos SDK in use ---"
+          xcrun --sdk iphoneos --show-sdk-version || true
+
+      - name: Free disk space
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          rm -rf ~/.cache/* || true
+          df -h /
+
+      - name: Build unsigned IPA
+        env:
+          BAZEL_USER_ROOT: /private/var/tmp/_bazel_containerhost
+        run: |
+          set -euxo pipefail
+          SOURCE_DIR="$RUNNER_TEMP/telegram-ios"
+          cd "$SOURCE_DIR"
+
+          BUILD_NUMBER_OFFSET="$(cat "$SOURCE_DIR/build_number_offset")"
+          APP_VERSION="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["app"])' "$SOURCE_DIR/versions.json")"
+          COMMIT_COUNT="$(git -C "$SOURCE_DIR" rev-list --count HEAD)"
+          BUILD_NUMBER="$((900000 + COMMIT_COUNT + BUILD_NUMBER_OFFSET))"
+          BAZEL_CACHE_DIR="$RUNNER_TEMP/bazel-disk-cache"
+          mkdir -p "$BAZEL_CACHE_DIR"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
+          # The bundled fake-codesigning profiles expired 2026-10-30; Bazel's plisttool refuses an
+          # expired ExpirationDate. Re-sign them with the repo's own self-signed identity, pushed to 2036.
+          python3 "$GITHUB_WORKSPACE/scripts/resign_profiles.py" "$SOURCE_DIR"
+
+          python3 "$SOURCE_DIR/build-system/Make/ImportCertificates.py" --path "$SOURCE_DIR/build-system/fake-codesigning/certs"
+
+          python3 -u "$SOURCE_DIR/build-system/Make/Make.py" \
+            --bazelUserRoot="$BAZEL_USER_ROOT" \
+            --overrideXcodeVersion \
+            --cacheDir="$BAZEL_CACHE_DIR" \
+            build \
+            --configurationPath="$SOURCE_DIR/build-system/appstore-configuration.json" \
+            --codesigningInformationPath="$SOURCE_DIR/build-system/fake-codesigning" \
+            --configuration=release_arm64 \
+            --outputBuildArtifactsPath="$SOURCE_DIR/build/artifacts" \
+            --buildNumber="$BUILD_NUMBER"
+
+      - name: Strip extensions and locales, repackage
+        run: |
+          set -euxo pipefail
+          SOURCE_DIR="$RUNNER_TEMP/telegram-ios"
+          ARTIFACTS_DIR="$SOURCE_DIR/build/artifacts"
+          WORK_DIR="$RUNNER_TEMP/modgift-ipa-work"
+
+          IPA_PATH=""
+          for candidate in "$ARTIFACTS_DIR/Telegram.ipa" "$ARTIFACTS_DIR"/*.ipa; do
+            if [[ -f "$candidate" ]]; then IPA_PATH="$candidate"; break; fi
+          done
+          if [[ -z "$IPA_PATH" ]]; then
+            echo "No IPA produced." >&2
+            ls -la "$ARTIFACTS_DIR" 2>/dev/null || true
+            exit 1
+          fi
+          echo "Using IPA: $IPA_PATH"
+
+          rm -rf "$WORK_DIR"; mkdir -p "$WORK_DIR"
+          ditto -x -k "$IPA_PATH" "$WORK_DIR"
+
+          APP_DIR="$(find "$WORK_DIR/Payload" -maxdepth 1 -name '*.app' -type d | head -1)"
+          if [[ -z "$APP_DIR" ]]; then echo "no .app in Payload" >&2; exit 1; fi
+
+          # Drop extensions + watch so a free Apple ID needs only one App ID.
+          IFS=',' read -ra DROP <<< "$IPA_DROP_PLUGINS"
+          if [[ -d "$APP_DIR/PlugIns" ]]; then
+            for token in "${DROP[@]}"; do
+              find "$APP_DIR/PlugIns" -maxdepth 1 -iname "*${token}*" -exec rm -rf {} + 2>/dev/null || true
+            done
+            rmdir "$APP_DIR/PlugIns" 2>/dev/null || true
+          fi
+          rm -rf "$APP_DIR/Watch" 2>/dev/null || true
+
+          # Keep only the wanted locales everywhere in the bundle.
+          IFS=',' read -ra KEEP <<< "$IPA_KEEP_LOCALES"
+          keep_args=()
+          for loc in "${KEEP[@]}"; do keep_args+=(-name "${loc}.lproj" -o); done
+          unset 'keep_args[${#keep_args[@]}-1]'
+          find "$APP_DIR" -type d -name "*.lproj" ! \( "${keep_args[@]}" \) -prune -exec rm -rf {} + 2>/dev/null || true
+
+          # Stamp the build number into the display name so installs are distinguishable on-device.
+          python3 - "$APP_DIR" "$BUILD_NUMBER" <<'PY'
+          import sys, plistlib, pathlib
+          app = pathlib.Path(sys.argv[1]); build = sys.argv[2]
+          info = app / "Info.plist"
+          with info.open("rb") as f: d = plistlib.load(f)
+          d["CFBundleDisplayName"] = f"Telegram mod {build}"
+          d["CFBundleVersion"] = build
+          with info.open("wb") as f: plistlib.dump(d, f)
+          print("stamped display name + build", build)
+          PY
+
+          OUT="$RUNNER_TEMP/artifacts"; rm -rf "$OUT"; mkdir -p "$OUT"
+          (cd "$WORK_DIR" && ditto -c -k --sequesterRsrc --keepParent Payload "$OUT/Telegram-modgift-unsigned.ipa")
+          ls -la "$OUT"
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-modgift-unsigned
+          path: ${{ runner.temp }}/artifacts/Telegram-modgift-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
