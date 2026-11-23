@@ -178,26 +178,32 @@ jobs:
           unset 'keep_args[${#keep_args[@]}-1]'
           find "$APP_DIR" -type d -name "*.lproj" ! \( "${keep_args[@]}" \) -prune -exec rm -rf {} + 2>/dev/null || true
 
-          # Stamp the build number into the display name so installs are distinguishable on-device.
+          # Brand the app as Larpgram and stamp the build number so installs are distinguishable
+          # on-device. The compile-time bundle id stays ph.telegra.Telegraph (the fake signing
+          # profiles are issued for it); the runtime reads Bundle.main.bundleIdentifier, so
+          # rewriting CFBundleIdentifier here gives the installed app the requested identity.
+          # Sideloadly re-signs and may assign its own bundle id on a free Apple ID anyway.
           python3 - "$APP_DIR" "$BUILD_NUMBER" <<'PY'
           import sys, plistlib, pathlib
           app = pathlib.Path(sys.argv[1]); build = sys.argv[2]
           info = app / "Info.plist"
           with info.open("rb") as f: d = plistlib.load(f)
-          d["CFBundleDisplayName"] = f"Telegram mod {build}"
+          d["CFBundleIdentifier"] = "vip.larpgram.enigma"
+          d["CFBundleDisplayName"] = "Larpgram"
+          d["CFBundleName"] = "Larpgram"
           d["CFBundleVersion"] = build
           with info.open("wb") as f: plistlib.dump(d, f)
-          print("stamped display name + build", build)
+          print("branded Larpgram (vip.larpgram.enigma), build", build)
           PY
 
           OUT="$RUNNER_TEMP/artifacts"; rm -rf "$OUT"; mkdir -p "$OUT"
-          (cd "$WORK_DIR" && ditto -c -k --sequesterRsrc --keepParent Payload "$OUT/Telegram-modgift-unsigned.ipa")
+          (cd "$WORK_DIR" && ditto -c -k --sequesterRsrc --keepParent Payload "$OUT/Larpgram-unsigned.ipa")
           ls -la "$OUT"
 
       - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Telegram-modgift-unsigned
-          path: ${{ runner.temp }}/artifacts/Telegram-modgift-unsigned.ipa
+          name: Larpgram-unsigned
+          path: ${{ runner.temp }}/artifacts/Larpgram-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
