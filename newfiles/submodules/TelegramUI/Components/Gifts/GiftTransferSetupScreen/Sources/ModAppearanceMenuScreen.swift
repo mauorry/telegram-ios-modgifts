@@ -9,6 +9,7 @@ import AccountContext
 import TelegramCore
 import TelegramPresentationData
 import GiftNetworkTransfer
+import GiftItemComponent
 import PlainButtonComponent
 import MultilineTextComponent
 import PromptUI
@@ -230,9 +231,8 @@ private final class ModAppearanceMenuComponent: Component {
 
             // Status line above publish.
             let statusText: String
-            if let lastPublishedAt = state.lastPublishedAt {
+            if state.lastPublishedAt != nil {
                 statusText = strings.Mod_Appearance_Published
-                _ = lastPublishedAt
             } else {
                 statusText = strings.Mod_Appearance_Hint
             }
@@ -255,7 +255,7 @@ private final class ModAppearanceMenuComponent: Component {
             let phoneSize = self.phoneRowView.update(
                 transition: transition,
                 component: AnyComponent(PlainButtonComponent(
-                    content: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Mod_Appearance_NumberRow(phoneTitle), font: Font.regular(17.0), textColor: theme.list.itemPrimaryTextColor)))),
+                    content: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Mod_Appearance_NumberRow(phoneTitle).string, font: Font.regular(17.0), textColor: theme.list.itemPrimaryTextColor)))),
                     background: AnyComponent(Rectangle(color: theme.list.itemBlocksBackgroundColor)),
                     effectAlignment: .center,
                     contentInsets: UIEdgeInsets(top: 12.0, left: 16.0, bottom: 12.0, right: 16.0),
