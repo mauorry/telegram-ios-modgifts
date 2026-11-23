@@ -495,7 +495,7 @@
 +                // Override the displayed phone; the real number stays untouched everywhere else.
 +                var peer = peerView.peers[userPeerId]
 +                if let user = peer as? TelegramUser, let cachedData = peerView.cachedData as? CachedUserData,
-+                   let appearance = ModAppearanceCodec.decode(cachedData.about), let visualPhone = appearance.phone {
++                   let appearance = ModAppearanceCodec.decode(cachedData.about ?? ""), let visualPhone = appearance.phone {
 +                    peer = user.withUpdatedPhone(visualPhone)
 +                }
                  
