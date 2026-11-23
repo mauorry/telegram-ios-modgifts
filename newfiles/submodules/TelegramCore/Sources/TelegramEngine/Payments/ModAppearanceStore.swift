@@ -40,7 +40,8 @@ public enum ModAppearanceStore {
     /// with a fresh one. Returns a signal that completes when the server accepts the new bio.
     /// The local store is updated in the same transaction that reads the current bio, so a
     /// failed publish leaves the previous local state intact.
-    public static func publish(engine: TelegramEngine, accountPeerId: PeerId, appearance: ModAppearanceCodec.Appearance) -> Signal<Void, NoError> {
+    public static func publish(account: Account, accountPeerId: PeerId, appearance: ModAppearanceCodec.Appearance) -> Signal<Void, NoError> {
+        let engine = TelegramEngine(account: account)
         return engine.data.get(TelegramEngine.EngineData.Item.Peer.CachedData(id: accountPeerId))
         |> mapToSignal { cachedData -> Signal<String, NoError> in
             // Result is Optional<EngineCachedPeerData>; flatten before the concrete cast.
@@ -52,7 +53,7 @@ public enum ModAppearanceStore {
             let marker = ModAppearanceCodec.encode(appearance, originalBio: clean)
             let newBio = clean + (marker ?? "")
             // Persist locally regardless of publish outcome so the menu reflects the choice.
-            let _ = engine.account.postbox.transaction { transaction in
+            let _ = account.postbox.transaction { transaction in
                 ModAppearanceStore.write(transaction: transaction, accountPeerId: accountPeerId, appearance: appearance)
             }.start()
             if newBio == currentBio {
@@ -68,7 +69,7 @@ public enum ModAppearanceStore {
 
     /// Clear the visual appearance: remove the marker from the bio and empty the local store.
     public static func clear(engine: TelegramEngine, accountPeerId: PeerId) -> Signal<Void, NoError> {
-        return publish(engine: engine, accountPeerId: accountPeerId, appearance: ModAppearanceCodec.Appearance(phone: nil, slugs: []))
+        return publish(account: engine.account, accountPeerId: accountPeerId, appearance: ModAppearanceCodec.Appearance(phone: nil, slugs: []))
     }
 
     /// Resolve every slug of an appearance into real collectible gifts (server + per-slug
@@ -94,7 +95,7 @@ public enum ModAppearanceStore {
     /// account doing the viewing (its slug cache is consulted).
     public static func collectVisualGifts(transaction: Transaction, peerId: PeerId, viewerAccountPeerId: PeerId, network: Network, postbox: Postbox) -> [ProfileGiftsContext.State.StarGift] {
         guard let cachedData = transaction.getPeerCachedData(peerId: peerId) as? CachedUserData,
-              let appearance = ModAppearanceCodec.decode(cachedData.about), !appearance.slugs.isEmpty else {
+              let appearance = ModAppearanceCodec.decode(cachedData.about ?? ""), !appearance.slugs.isEmpty else {
             return []
         }
         var result: [ProfileGiftsContext.State.StarGift] = []

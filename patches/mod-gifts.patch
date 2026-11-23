@@ -244,7 +244,7 @@
 +        }
 +
 +        public func publishModAppearance(_ appearance: ModAppearanceCodec.Appearance) -> Signal<Void, NoError> {
-+            return ModAppearanceStore.publish(engine: self, accountPeerId: self.account.peerId, appearance: appearance)
++            return ModAppearanceStore.publish(account: self.account, accountPeerId: self.account.peerId, appearance: appearance)
 +        }
 +
 +        public func resolveGiftTransferSlug(slug: String) -> Signal<StarGift.UniqueGift?, NoError> {
