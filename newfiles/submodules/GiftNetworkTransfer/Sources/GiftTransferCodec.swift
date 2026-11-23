@@ -128,11 +128,20 @@ public enum GiftTransferCodec {
             return nil
         }
         let inner = String(text[range])
-        // Strip the markers.
-        guard inner.hasPrefix(markerStart), inner.hasSuffix(markerEnd) else {
+        // Strip the markers by UNICODE SCALAR, never by Character: a base64 payload can end in
+        // '=', and '=' followed by the zero-width marker forms a SINGLE grapheme cluster, so
+        // `dropLast(1)` would remove both the padding and the marker and corrupt the base64.
+        // (Verified locally: "abc=" + U+200C has 4 Characters but 5 unicode scalars.)
+        let scalars = Array(inner.unicodeScalars)
+        let startScalars = Array(markerStart.unicodeScalars)
+        let endScalars = Array(markerEnd.unicodeScalars)
+        guard scalars.count >= startScalars.count + endScalars.count,
+              Array(scalars[0 ..< startScalars.count]) == startScalars,
+              Array(scalars[(scalars.count - endScalars.count)...]) == endScalars else {
             return nil
         }
-        let base64 = String(inner.dropFirst(markerStart.count).dropLast(markerEnd.count))
+        let body = scalars[startScalars.count ..< (scalars.count - endScalars.count)]
+        let base64 = String(String.UnicodeScalarView(body))
         guard let data = Data(base64Encoded: base64),
               let wire = try? JSONDecoder().decode(WirePayload.self, from: data) else {
             return nil

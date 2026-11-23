@@ -375,7 +375,7 @@
 +                return
 +            }
 +            let controller = ModAppearanceMenuScreen(context: strongSelf.context)
-+            strongSelf.present(controller, in: .window(.root))
++            strongSelf.pushViewController(controller)
 +        }
          if let sharedContext = self.context.sharedContext as? SharedAccountContextImpl {
              chatListController.tabBarItem.badgeValue = sharedContext.switchingData.chatListBadge

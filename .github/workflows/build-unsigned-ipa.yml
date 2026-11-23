@@ -126,11 +126,15 @@ jobs:
 
           python3 "$SOURCE_DIR/build-system/Make/ImportCertificates.py" --path "$SOURCE_DIR/build-system/fake-codesigning/certs"
 
+          # --continueOnError forwards bazel's --keep_going: every failing file reports its
+          # errors in ONE pass instead of stopping at the first target. Without it each round
+          # trip reveals only the next error and costs a full ~70-minute build.
           python3 -u "$SOURCE_DIR/build-system/Make/Make.py" \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --overrideXcodeVersion \
             --cacheDir="$BAZEL_CACHE_DIR" \
             build \
+            --continueOnError \
             --configurationPath="$SOURCE_DIR/build-system/appstore-configuration.json" \
             --codesigningInformationPath="$SOURCE_DIR/build-system/fake-codesigning" \
             --configuration=release_arm64 \
