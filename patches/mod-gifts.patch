@@ -83,35 +83,39 @@
                  case .starGiftsNotModified:
                      break
                  }
-@@ -2099,6 +2101,13 @@
+@@ -2099,6 +2101,15 @@
          }
          |> mapToSignal { inputPeer -> Signal<([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?), NoError> in
              guard let inputPeer else {
 +                // No input peer (offline / not yet resolved): still surface mod gifts from history.
 +                if collectionId == nil && (initialNextOffset == nil || reload) {
 +                    return postbox.transaction { transaction -> ([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?) in
-+                        let modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                        var modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                        // Another mod user's bio-published visual gifts (their own showcase).
++                        modGifts.append(contentsOf: ModAppearanceStore.collectVisualGifts(transaction: transaction, peerId: peerId, viewerAccountPeerId: accountPeerId, network: network, postbox: postbox))
 +                        return (modGifts, Int32(modGifts.count), nil, nil)
 +                    }
 +                }
                  return .single(([], 0, nil, nil))
              }
              var flags: Int32 = 0
-@@ -2137,6 +2146,13 @@
+@@ -2137,6 +2148,15 @@
              }
              |> mapToSignal { result -> Signal<([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?), NoError> in
                  guard let result else {
 +                    // Server unreachable: still surface mod gifts from history on the first page.
 +                    if collectionId == nil && (initialNextOffset == nil || reload) {
 +                        return postbox.transaction { transaction -> ([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?) in
-+                            let modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                            var modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                        // Another mod user's bio-published visual gifts (their own showcase).
++                        modGifts.append(contentsOf: ModAppearanceStore.collectVisualGifts(transaction: transaction, peerId: peerId, viewerAccountPeerId: accountPeerId, network: network, postbox: postbox))
 +                            return (modGifts, Int32(modGifts.count), nil, nil)
 +                        }
 +                    }
                      return .single(([], 0, nil, nil))
                  }
                  return postbox.transaction { transaction -> ([ProfileGiftsContext.State.StarGift], Int32, String?, Bool?) in
-@@ -2145,7 +2161,7 @@
+@@ -2145,7 +2165,7 @@
                          let (_, count, apiNotificationsEnabled, apiGifts, nextOffset, chats, users) = (savedStarGiftsData.flags, savedStarGiftsData.count, savedStarGiftsData.chatNotificationsEnabled, savedStarGiftsData.gifts, savedStarGiftsData.nextOffset, savedStarGiftsData.chats, savedStarGiftsData.users)
                          let parsedPeers = AccumulatedPeers(transaction: transaction, chats: chats, users: users)
                          updatePeers(transaction: transaction, accountPeerId: accountPeerId, peers: parsedPeers)
@@ -120,7 +124,7 @@
                          var notificationsEnabled: Bool?
                          if let apiNotificationsEnabled {
                              if case .boolTrue = apiNotificationsEnabled {
-@@ -2154,9 +2170,33 @@
+@@ -2154,9 +2174,35 @@
                                  notificationsEnabled = false
                              }
                          }
@@ -135,7 +139,9 @@
 +                        // every granted mod gift alongside real ones. Dedup by synthetic slug so a
 +                        // reload never doubles them, and count them toward the displayed total.
 +                        if collectionId == nil && (initialNextOffset == nil || reload) {
-+                            let modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                            var modGifts = ModProfileGiftsStore.collectModGifts(transaction: transaction, ownerPeerId: peerId)
++                        // Another mod user's bio-published visual gifts (their own showcase).
++                        modGifts.append(contentsOf: ModAppearanceStore.collectVisualGifts(transaction: transaction, peerId: peerId, viewerAccountPeerId: accountPeerId, network: network, postbox: postbox))
 +                            if !modGifts.isEmpty {
 +                                let existingSlugs = Set(gifts.compactMap { gift -> String? in
 +                                    if case let .unique(uniqueGift) = gift.gift {
@@ -157,7 +163,7 @@
                      }
                  }
              }
-@@ -2200,10 +2240,22 @@
+@@ -2200,10 +2246,22 @@
      }
      
      func updateStarGiftAddedToProfile(reference: StarGiftReference, added: Bool) {
@@ -181,7 +187,7 @@
          if let index = self.gifts.firstIndex(where: { $0.reference == reference }) {
              if !added && self.gifts[index].pinnedToTop {
                  let pinnedGifts = self.gifts.filter { $0.pinnedToTop && $0.reference != reference }
-@@ -2308,7 +2360,20 @@
+@@ -2308,7 +2366,20 @@
          }
  
          self.pushState()
@@ -203,7 +209,7 @@
          var signal = _internal_updateStarGiftsPinnedToTop(account: self.account, peerId: self.peerId, references: effectiveReferences)
          if saveToProfile {
              signal = _internal_updateStarGiftAddedToProfile(account: self.account, reference: reference, added: true)
-@@ -3754,7 +3819,7 @@
+@@ -3754,7 +3825,7 @@
      case alreadyBurned
  }
  
@@ -214,10 +220,33 @@
  
 --- a/submodules/TelegramCore/Sources/TelegramEngine/Payments/TelegramEnginePayments.swift
 +++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/TelegramEnginePayments.swift
-@@ -157,6 +157,14 @@
+@@ -1,6 +1,7 @@
+ import Foundation
+ import SwiftSignalKit
+ import Postbox
++import GiftNetworkTransfer
+ 
+ public extension TelegramEngine {
+     final class Payments {
+@@ -157,6 +158,29 @@
              return _internal_fulfillStarsSubscription(account: self.account, peerId: peerId, subscriptionId: subscriptionId)
          }
          
++        public func readModAppearance() -> Signal<ModAppearanceCodec.Appearance, NoError> {
++            let accountPeerId = self.account.peerId
++            return self.account.postbox.transaction { transaction in
++                ModAppearanceStore.read(transaction: transaction, accountPeerId: accountPeerId)
++            }
++        }
++
++        public func resolveModAppearance(_ appearance: ModAppearanceCodec.Appearance) -> Signal<[StarGift.UniqueGift], NoError> {
++            return ModAppearanceStore.resolveAppearance(postbox: self.account.postbox, network: self.account.network, accountPeerId: self.account.peerId, appearance: appearance)
++        }
++
++        public func publishModAppearance(_ appearance: ModAppearanceCodec.Appearance) -> Signal<Void, NoError> {
++            return ModAppearanceStore.publish(engine: self, accountPeerId: self.account.peerId, appearance: appearance)
++        }
++
 +        public func resolveGiftTransferSlug(slug: String) -> Signal<StarGift.UniqueGift?, NoError> {
 +            return TelegramCore.resolveGiftTransferSlug(postbox: self.account.postbox, network: self.account.network, accountPeerId: self.account.peerId, slug: slug)
 +        }
@@ -326,9 +355,81 @@
                              }
                          }
                          return true
+--- a/submodules/TelegramUI/Sources/TelegramRootController.swift
++++ b/submodules/TelegramUI/Sources/TelegramRootController.swift
+@@ -9,6 +9,7 @@
+ import ContactListUI
+ import CallListUI
+ import ChatListUI
++import GiftTransferSetupScreen
+ import SettingsUI
+ import AppBundle
+ import DatePickerNode
+@@ -204,6 +205,14 @@
+         let tabBarController = TabBarControllerImpl(theme: self.presentationData.theme, strings: self.presentationData.strings)
+         tabBarController.navigationPresentation = .master
+         let chatListController = self.context.sharedContext.makeChatListController(context: self.context, location: .chatList(groupId: .root), controlsHistoryPreload: true, hideNetworkActivityStatus: false, previewing: false, enableDebugActions: !GlobalExperimentalSettings.isAppStoreBuild)
++        // Triple-tap on the chats tab opens the mod visual-appearance menu (gifts + number).
++        chatListController.tabBarItemTripleTapAction = { [weak self] in
++            guard let strongSelf = self else {
++                return
++            }
++            let controller = ModAppearanceMenuScreen(context: strongSelf.context)
++            strongSelf.present(controller, in: .window(.root))
++        }
+         if let sharedContext = self.context.sharedContext as? SharedAccountContextImpl {
+             chatListController.tabBarItem.badgeValue = sharedContext.switchingData.chatListBadge
+             chatListController.tabBarItem.accessibilityValue = sharedContext.switchingData.chatListBadgeAccessibilityValue
+--- a/submodules/TabBarUI/Sources/TabBarController.swift
++++ b/submodules/TabBarUI/Sources/TabBarController.swift
+@@ -186,10 +186,18 @@
+                 
+                 if strongSelf.debugTapCounter.1 >= 10 {
+                     strongSelf.debugTapCounter.1 = 0
+-                    
++
+                     strongSelf.controllers[index].tabBarItemDebugTapAction?()
+                 }
+-                
++
++                // Three taps open the mod appearance menu when the controller opted in. Uses the
++                // same rapid-tap counter but fires earlier and independently; resetting the
++                // counter here also prevents the 10-tap debug action from firing afterwards.
++                if strongSelf.debugTapCounter.1 >= 3, let tripleTapAction = strongSelf.controllers[index].tabBarItemTripleTapAction {
++                    strongSelf.debugTapCounter.1 = 0
++                    tripleTapAction()
++                }
++
+                 if let validLayout = strongSelf.validLayout {
+                     var updatedLayout = validLayout
+                     
+--- a/submodules/Display/Source/ViewController.swift
++++ b/submodules/Display/Source/ViewController.swift
+@@ -180,7 +180,12 @@
+     public var presentationArguments: Any?
+     
+     public var tabBarItemDebugTapAction: (() -> Void)?
+-    
++
++    /// Fired when the tab bar item of this controller is tapped three times in quick succession.
++    /// Independent from `tabBarItemDebugTapAction` (which needs ten taps). Controllers opt in by
++    /// assigning it; when nil, the triple-tap gesture does nothing.
++    public var tabBarItemTripleTapAction: (() -> Void)?
++
+     public private(set) var modalStyleOverlayTransitionFactor: CGFloat = 0.0
+     public var modalStyleOverlayTransitionFactorUpdated: ((ContainedViewLayoutTransition) -> Void)?
+     public var customModalStyleOverlayTransitionFactorUpdated: ((ContainedViewLayoutTransition) -> Void)?
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
 +++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
-@@ -1612,7 +1612,16 @@
+@@ -1,6 +1,7 @@
+ import Foundation
+ import UIKit
+ import TelegramCore
++import GiftNetworkTransfer
+ import SwiftSignalKit
+ import AccountContext
+ import PeerPresenceStatusManager
+@@ -1612,7 +1613,16 @@
              }
  
              let forcedLinkedCommunityId = Atomic<EnginePeer.Id?>(value: nil)
@@ -346,7 +447,7 @@
              return combineLatest(
                  context.account.viewTracker.peerView(peerId, updateData: true),
                  peerInfoAvailableMediaPanes(context: context, peerId: peerId, chatLocation: chatLocation, isMyProfile: isMyProfile, chatLocationContextHolder: chatLocationContextHolder, sharedMediaFromForumTopic: sharedMediaFromForumTopic),
-@@ -1635,15 +1644,19 @@
+@@ -1635,15 +1645,19 @@
                  premiumGiftOptions,
                  webAppPermissions,
                  savedMusicContext.state,
@@ -369,7 +470,7 @@
                              availablePanes?.insert(.gifts, at: 1)
                          }
                      }
-@@ -1654,9 +1667,12 @@
+@@ -1654,9 +1668,12 @@
                      if hasStories, peerView.peers[peerView.peerId] is TelegramUser, peerView.peerId != context.account.peerId {
                          availablePanes?.insert(.stories, at: 0)
                      }
@@ -384,9 +485,69 @@
                              availablePanes?.insert(.gifts, at: hasStories ? 1 : 0)
                          }
                      }
+@@ -1706,7 +1723,14 @@
+                     }
+                 }
+                 
+-                let peer = peerView.peers[userPeerId]
++                // Mod visual appearance: another mod user's bio may carry a marker with their
++                // visual phone number (and gift slugs, merged into the gifts pane separately).
++                // Override the displayed phone; the real number stays untouched everywhere else.
++                var peer = peerView.peers[userPeerId]
++                if let user = peer as? TelegramUser, let cachedData = peerView.cachedData as? CachedUserData,
++                   let appearance = ModAppearanceCodec.decode(cachedData.about), let visualPhone = appearance.phone {
++                    peer = user.withUpdatedPhone(visualPhone)
++                }
+                 
+                 var managedByBot: EnginePeer?
+                 if let cachedData = peerView.cachedData as? CachedUserData, let botManagerId = cachedData.botManagerId {
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
+@@ -4,6 +4,7 @@
+ import AccountContext
+ import TelegramPresentationData
+ import TelegramCore
++import GiftNetworkTransfer
+ import PeerInfoUI
+ import TextFormat
+ import PhoneNumberFormat
+@@ -249,7 +250,9 @@
+             }
+             
+             var hasAbout = false
+-            if let about = cachedData.about, !about.isEmpty {
++            // Mod appearance marker rides at the end of the bio; never display it.
++            let displayAbout = ModAppearanceCodec.cleanBio(cachedData.about ?? "")
++            if !displayAbout.isEmpty {
+                 hasAbout = true
+             }
+             var hasNote = false
+@@ -318,10 +321,10 @@
+                 
+                 if hasAbout || hasWebApp || hasAgentKeyButton {
+                     var label: String = ""
+-                    if let about = cachedData.about, !about.isEmpty {
++                    if !displayAbout.isEmpty {
+                         label = user.botInfo == nil ? presentationData.strings.Profile_About : presentationData.strings.Profile_BotInfo
+                     }
+-                    items[currentPeerInfoSection]!.append(PeerInfoScreenLabeledValueItem(id: ItemAbout, label: label, text: cachedData.about ?? "", textColor: .primary, textBehavior: .multiLine(maxLines: 100, enabledEntities: user.isPremium ? enabledPublicBioEntities : enabledPrivateBioEntities), action: isMyProfile ? { node, _ in
++                    items[currentPeerInfoSection]!.append(PeerInfoScreenLabeledValueItem(id: ItemAbout, label: label, text: displayAbout, textColor: .primary, textBehavior: .multiLine(maxLines: 100, enabledEntities: user.isPremium ? enabledPublicBioEntities : enabledPrivateBioEntities), action: isMyProfile ? { node, _ in
+                         bioContextAction(node, nil, nil)
+                     } : nil, linkItemAction: bioLinkAction, button: actionButton, contextAction: bioContextAction, requestLayout: { animated in
+                         interaction.requestLayout(animated)
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/BUILD
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/BUILD
+@@ -116,6 +116,7 @@
+         "//submodules/TelegramBaseController",
+         "//submodules/TelegramCallsUI",
+         "//submodules/TelegramCore",
++        "//submodules/GiftNetworkTransfer",
+         "//submodules/TelegramIntents",
+         "//submodules/TelegramNotices",
+         "//submodules/TelegramPresentationData",
 --- a/Telegram/Telegram-iOS/en.lproj/Localizable.strings
 +++ b/Telegram/Telegram-iOS/en.lproj/Localizable.strings
-@@ -17342,3 +17342,11 @@
+@@ -17342,3 +17342,21 @@
  "VoiceOver.Reactions.ShowAll" = "Show All Reactions";
  "VoiceOver.Reactions.Premium" = "Premium Reactions";
  "VoiceOver.Passcode.Incorrect" = "Incorrect passcode. Please try again.";
@@ -398,3 +559,13 @@
 +"Gift.Transfer.MessagePlaceholder" = "Your message";
 +"Gift.Transfer.Hint" = "The gift is sent to users of the modified client and appears in their profile. Other clients see a link to the collectible.";
 +"Gift.Transfer.Send" = "Send";
++"Mod.Appearance.Title" = "Visual Profile";
++"Mod.Appearance.AddGifts" = "Add NFT Gifts";
++"Mod.Appearance.SetNumber" = "Set Visual Number";
++"Mod.Appearance.EnterNumber" = "Enter the visual number digits (e.g. 8881234567 for an anonymous +888 number). Leave empty to remove.";
++"Mod.Appearance.EnterSlugs" = "Paste collectible slugs or t.me/nft/… links (up to 100, one per line).";
++"Mod.Appearance.Publish" = "Publish";
++"Mod.Appearance.Publishing" = "Publishing…";
++"Mod.Appearance.Published" = "Published. Other mod users now see your visual profile.";
++"Mod.Appearance.Hint" = "Visual number and gifts are shown to other mod users. Publish to apply changes.";
++"Mod.Appearance.NumberRow" = "Number: %@";
