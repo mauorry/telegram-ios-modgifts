@@ -107,13 +107,14 @@ private final class ModAppearanceMenuComponent: Component {
             guard !parsed.isEmpty else {
                 return
             }
-            self.appearance.slugs.append(contentsOf: parsed)
+            // Appearance is a value type with immutable fields; rebuild it with the new slug list.
+            self.appearance = ModAppearanceCodec.Appearance(phone: self.appearance.phone, slugs: self.appearance.slugs + parsed)
             self.updated()
             self.refreshResolved()
         }
 
         func removeSlug(_ slug: String) {
-            self.appearance.slugs.removeAll { $0 == slug }
+            self.appearance = ModAppearanceCodec.Appearance(phone: self.appearance.phone, slugs: self.appearance.slugs.filter { $0 != slug })
             self.resolvedGifts.removeAll { $0.slug == slug }
             self.updated()
         }
