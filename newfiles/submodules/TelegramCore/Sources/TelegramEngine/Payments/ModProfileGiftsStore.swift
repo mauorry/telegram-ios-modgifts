@@ -286,7 +286,9 @@ public enum ModProfileGiftsStore {
             }
             drainOnce()
             // A later pass catches items whose first resolution failed (offline / not indexed).
-            disposableSet.add((Signal<Never, NoError>.complete()
+            // Signal<Void>.single(Void()) actually emits, so the delayed closure runs; a
+            // Signal<Never>.complete() would never emit and the closure is unreachable.
+            disposableSet.add((Signal<Void, NoError>.single(Void())
             |> suspendAwareDelay(30.0, queue: queue)
             |> mapToSignal { _ -> Signal<Never, NoError> in
                 drainOnce()
